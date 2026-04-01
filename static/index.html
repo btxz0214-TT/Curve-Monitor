@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Strategic Information Radar</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --border: #2d3a4d;
+      --text: #e7ecf3;
+      --muted: #8b9cb3;
+      --accent: #3d8bfd;
+      --high: #f87171;
+      --medium: #fbbf24;
+      --low: #6ee7b7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 0 0 0.25rem;
+      letter-spacing: -0.02em;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-bottom: 1.5rem;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 0.65rem 1.25rem;
+      font-size: 1rem;
+      font-weight: 600;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:hover { filter: brightness(1.08); }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+    .status.error { color: var(--high); }
+    section {
+      margin-top: 2rem;
+      padding: 1.25rem 1.5rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    section h2 {
+      font-size: 1.1rem;
+      margin: 0 0 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .areas ul { margin: 0; padding-left: 1.25rem; }
+    .areas li { margin: 0.35rem 0; }
+    .rationale {
+      color: var(--muted);
+      font-size: 0.95rem;
+      margin-top: 1rem;
+    }
+    .urls a {
+      color: var(--accent);
+      word-break: break-all;
+    }
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .card:last-child { margin-bottom: 0; }
+    .badge {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      margin-bottom: 0.5rem;
+    }
+    .badge.High { background: rgba(248, 113, 113, 0.2); color: var(--high); }
+    .badge.Medium { background: rgba(251, 191, 36, 0.2); color: var(--medium); }
+    .badge.Low { background: rgba(110, 231, 183, 0.2); color: var(--low); }
+    .card .url {
+      font-size: 0.85rem;
+      margin-bottom: 0.5rem;
+    }
+    .card .url a { color: var(--accent); }
+    .summary { font-weight: 500; margin: 0.5rem 0; }
+    .reasoning {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin: 0;
+    }
+    pre.raw {
+      font-size: 0.75rem;
+      overflow: auto;
+      max-height: 240px;
+      background: var(--bg);
+      padding: 0.75rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Strategic Information Radar</h1>
+    <p class="sub">Two-stage scan: broad survey from <code>background.md</code>, then deep-dive on each article URL.</p>
+    <button type="button" id="scanBtn">Start Scan</button>
+    <p class="status" id="status"></p>
+
+    <section id="broadSection" style="display: none;">
+      <h2>Broad Scan Report</h2>
+      <div id="broadContent"></div>
+    </section>
+
+    <section id="deepSection" style="display: none;">
+      <h2>Deep Dive Report</h2>
+      <div id="deepContent"></div>
+    </section>
+  </div>
+
+  <script>
+    const scanBtn = document.getElementById("scanBtn");
+    const statusEl = document.getElementById("status");
+    const broadSection = document.getElementById("broadSection");
+    const broadContent = document.getElementById("broadContent");
+    const deepSection = document.getElementById("deepSection");
+    const deepContent = document.getElementById("deepContent");
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function renderBroad(data) {
+      const s = data.structured || {};
+      const areas = Array.isArray(s.areas) ? s.areas : [];
+      const urls = Array.isArray(s.article_urls) ? s.article_urls : [];
+      let html = "";
+      if (areas.length) {
+        html += '<div class="areas"><strong>Areas</strong><ul>';
+        areas.forEach((a) => { html += "<li>" + escapeHtml(String(a)) + "</li>"; });
+        html += "</ul></div>";
+      }
+      if (s.rationale) {
+        html += '<p class="rationale"><strong>Rationale</strong> — ' + escapeHtml(String(s.rationale)) + "</p>";
+      }
+      if (urls.length) {
+        html += '<div class="urls" style="margin-top:1rem;"><strong>Article URLs</strong><ul style="margin:0.5rem 0 0 1.25rem;">';
+        urls.forEach((u) => {
+          html += '<li><a href="' + escapeHtml(u) + '" target="_blank" rel="noopener">' + escapeHtml(u) + "</a></li>";
+        });
+        html += "</ul></div>";
+      }
+      if (data.raw_model_response) {
+        html += '<details style="margin-top:1rem;"><summary>Raw model response</summary><pre class="raw">' +
+          escapeHtml(data.raw_model_response) + "</pre></details>";
+      }
+      broadContent.innerHTML = html || "<p>No structured broad scan data.</p>";
+      broadSection.style.display = "block";
+    }
+
+    function renderDeep(items) {
+      if (!items || !items.length) {
+        deepContent.innerHTML = "<p>No deep-dive items.</p>";
+        deepSection.style.display = "block";
+        return;
+      }
+      let html = "";
+      items.forEach((item) => {
+        const imp = item.importance || "Low";
+        html += '<div class="card">';
+        html += '<span class="badge ' + escapeHtml(imp) + '">' + escapeHtml(imp) + "</span>";
+        if (item.source_url) {
+          html += '<div class="url"><a href="' + escapeHtml(item.source_url) +
+            '" target="_blank" rel="noopener">' + escapeHtml(item.source_url) + "</a></div>";
+        }
+        if (item.summary) {
+          html += '<p class="summary">' + escapeHtml(item.summary) + "</p>";
+        }
+        if (item.reasoning) {
+          html += '<p class="reasoning">' + escapeHtml(item.reasoning) + "</p>";
+        }
+        if (item.fetch_error) {
+          html += '<p class="reasoning" style="color:var(--high);">Fetch: ' + escapeHtml(item.fetch_error) + "</p>";
+        }
+        html += "</div>";
+      });
+      deepContent.innerHTML = html;
+      deepSection.style.display = "block";
+    }
+
+    scanBtn.addEventListener("click", async () => {
+      scanBtn.disabled = true;
+      statusEl.textContent = "Running scan (this may take several minutes)…";
+      statusEl.classList.remove("error");
+      broadSection.style.display = "none";
+      deepSection.style.display = "none";
+
+      try {
+        const res = await fetch("/run-scan", { method: "POST", headers: { Accept: "application/json" } });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const detail = body.detail || res.statusText || "Request failed";
+          throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+        }
+        statusEl.textContent = "Scan complete.";
+        renderBroad(body.broad_scan_report || {});
+        renderDeep(body.deep_dive_report || []);
+      } catch (e) {
+        statusEl.textContent = "Error: " + (e.message || String(e));
+        statusEl.classList.add("error");
+      } finally {
+        scanBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

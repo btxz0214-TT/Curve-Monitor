@@ -1,0 +1,6 @@
+.env
+deploy-config.json
+__pycache__/
+.venv/
+venv/
+*.pyc

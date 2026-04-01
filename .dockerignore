@@ -1,0 +1,9 @@
+.env
+.git
+.gitignore
+__pycache__
+.venv
+venv
+*.pyc
+.pytest_cache
+deploy-config.json
