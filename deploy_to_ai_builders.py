@@ -107,7 +107,7 @@ def main() -> None:
             "Content-Type": "application/json",
         },
         json=body,
-        timeout=120.0,
+        timeout=300.0,
     )
     print("HTTP", r.status_code)
     try:
