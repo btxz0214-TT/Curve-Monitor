@@ -99,6 +99,14 @@ jobs:
 
 平台 API 见 [OpenAPI — deployments](https://space.ai-builders.com/backend/openapi.json)：`POST /v1/deployments` 可带 **`env_vars`**（字符串键值对，最多 20 个），由平台**转发到容器**，不在平台数据库长期保存（见规范里的 *Stateless Design*）。
 
+### 两个部署槽位（常见坑）
+
+每个学生通常只有 **2 个并发服务**（`GET /v1/deployments` 里的 `limit`）。若有一个服务一直处于 **`UNHEALTHY`**（例如第一次用新 `service_name` 部署失败），它仍会**占一个槽位**，且平台**没有**公开的删除接口，第二个名字可能永远无法在 Koyeb 上真正建起来。
+
+**可行做法：** 把本项目的 GitHub 仓库 **重新部署到已有 HEALTHY 服务的 `service_name` 上**（例如你之前跑通过的 `btxz-chat`），即用同一 `service_name` 再发一次 `POST /v1/deployments`，`repo_url` 指向 **Curve-Monitor**。这样会**替换**该 URL 上原来的应用（原 Chat 需以后自己再部署回去）。
+
+`deploy-config.example.json` 里默认把 `service_name` 设为 **`btxz-chat`** 就是为了走这条“占槽复用”路径。
+
 本目录已包含：
 
 | 文件 | 作用 |
