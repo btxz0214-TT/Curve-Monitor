@@ -92,6 +92,7 @@ def main() -> None:
         "branch": branch,
         "port": 8000,
         "env_vars": env_vars,
+        "streaming_log_timeout_seconds": 120,
     }
 
     if args.dry_run:
