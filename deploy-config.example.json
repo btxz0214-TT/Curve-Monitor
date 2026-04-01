@@ -1,6 +1,6 @@
 {
-  "repo_url": "https://github.com/YOUR_GITHUB_USER/YOUR_PUBLIC_REPO",
-  "service_name": "your-radar-name",
+  "repo_url": "https://github.com/btxz0214-TT/Curve-Monitor",
+  "service_name": "curve-monitor",
   "branch": "main",
   "env_vars": {
     "CRON_SECRET": "long-random-string-same-as-cron-header",
