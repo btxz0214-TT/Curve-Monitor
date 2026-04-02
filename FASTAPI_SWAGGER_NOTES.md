@@ -107,6 +107,12 @@ jobs:
 
 `deploy-config.example.json` 里默认把 `service_name` 设为 **`btxz-chat`** 就是为了走这条“占槽复用”路径。
 
+### 重要：`btxz-chat` 实际从哪个 GitHub 构建？
+
+平台侧 **`btxz-chat` 的 Koyeb 构建会一直使用 `https://github.com/btxz0214-TT/Chat` 仓库**（与部署 API 里填的 `repo_url` 可能不一致——我们拉过 **build log**，里面仍是 Chat 旧 Dockerfile 的 `COPY chat_proxy.py …`）。
+
+因此要让线上出现 **Curve Monitor / Radar**，需要把 **与 Curve-Monitor 相同的代码推到 Chat 仓库的 `main`**（本仓库已用分支 **`backup/phase-a-chat-before-radar`** 备份了原 Chat），且 **`deploy-config.json` 的 `repo_url` 使用 Chat 仓库**后再发部署。
+
 本目录已包含：
 
 | 文件 | 作用 |
