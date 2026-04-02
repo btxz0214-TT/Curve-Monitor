@@ -9,7 +9,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Match the layout pattern used by the working btxz-chat image (selective COPY, not COPY . .).
-COPY main.py background.md ./
+# build-stamp.txt changes when we need to bust Koyeb/Docker layer cache so a new image actually rolls out.
+COPY main.py background.md build-stamp.txt ./
 COPY static ./static/
 
 EXPOSE 8000
