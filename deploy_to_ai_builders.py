@@ -107,6 +107,7 @@ def main() -> None:
         print(json.dumps(safe, indent=2))
         return
 
+    print(f"POST {API} (service_name={service_name}) …", flush=True)
     r = httpx.post(
         API,
         headers={
