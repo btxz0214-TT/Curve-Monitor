@@ -54,7 +54,7 @@ Then open `/docs` or `/` as needed.
 
 | GitHub Secret | 用途 |
 |---------------|------|
-| `RADAR_BASE_URL` | `https://你的服务.ai-builders.space`（不要末尾 `/`） |
+| `RADAR_BASE_URL` | `https://你的服务.ai-builders.space`（不要末尾 `/`）；若曾用旧名，可改用 Secret **`RADAR_URL`**（二选一） |
 | `RESEND_API_KEY` | [resend.com](https://resend.com) |
 | `WEEKLY_DIGEST_TO` | 收件人 |
 | `RESEND_FROM` | 可选 |

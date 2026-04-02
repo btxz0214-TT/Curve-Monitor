@@ -3,6 +3,7 @@
 #
 # Repo → Settings → Secrets and variables → Actions:
 #   RADAR_BASE_URL      https://YOUR-SERVICE.ai-builders.space  (no trailing slash)
+#   (or RADAR_URL — same value, if you used the old name)
 #   RESEND_API_KEY
 #   WEEKLY_DIGEST_TO
 # Optional:
@@ -26,17 +27,27 @@ jobs:
       - name: POST /run-scan then Resend HIGH summary
         env:
           RADAR_BASE_URL: ${{ secrets.RADAR_BASE_URL }}
+          RADAR_URL: ${{ secrets.RADAR_URL }}
           RUN_SCAN_SECRET: ${{ secrets.RUN_SCAN_SECRET }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           WEEKLY_DIGEST_TO: ${{ secrets.WEEKLY_DIGEST_TO }}
           RESEND_FROM: ${{ secrets.RESEND_FROM }}
         run: |
-          set -euo pipefail
-          if [ -z "${RADAR_BASE_URL:-}" ] || [ -z "${RESEND_API_KEY:-}" ] || [ -z "${WEEKLY_DIGEST_TO:-}" ]; then
-            echo "Set GitHub Actions secrets: RADAR_BASE_URL, RESEND_API_KEY, WEEKLY_DIGEST_TO"
+          set -eo pipefail
+          BASE_RAW="${RADAR_BASE_URL:-}"
+          if [ -z "$BASE_RAW" ]; then BASE_RAW="${RADAR_URL:-}"; fi
+          BASE_RAW="$(echo -n "$BASE_RAW" | tr -d '\r\n' | sed 's/[[:space:]]*$//')"
+          missing=""
+          if [ -z "$BASE_RAW" ]; then missing="$missing RADAR_BASE_URL"; fi
+          if [ -z "${RESEND_API_KEY:-}" ]; then missing="$missing RESEND_API_KEY"; fi
+          if [ -z "${WEEKLY_DIGEST_TO:-}" ]; then missing="$missing WEEKLY_DIGEST_TO"; fi
+          if [ -n "$missing" ]; then
+            echo "Missing or empty repository secrets:$missing"
+            echo "Create them under Settings → Secrets and variables → Actions (names are case-sensitive)."
+            echo "RADAR_BASE_URL must be like https://your-service.ai-builders.space with no trailing slash."
             exit 1
           fi
-          BASE="${RADAR_BASE_URL%/}"
+          BASE="${BASE_RAW%/}"
           if [ -n "${RUN_SCAN_SECRET:-}" ]; then
             code=$(curl -sS -o response.json -w "%{http_code}" \
               -X POST "$BASE/run-scan" \
