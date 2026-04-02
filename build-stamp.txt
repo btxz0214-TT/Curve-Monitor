@@ -1,1 +1,1 @@
-radar-image-2026-04-02Tforce-rebuild-openapi-check
+radar-image-2026-04-02Tbuild-stamp-endpoint-v1

@@ -17,7 +17,7 @@ import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel, ConfigDict, Field
@@ -687,6 +687,19 @@ def serve_index():
     if not index.is_file():
         raise HTTPException(status_code=404, detail="index.html missing")
     return FileResponse(index)
+
+
+@app.get(
+    "/_radar/build-stamp",
+    include_in_schema=False,
+    summary="Docker image build stamp (debug)",
+)
+def radar_build_stamp():
+    """Plain text from `build-stamp.txt` in the image; use to verify Koyeb rolled a new build."""
+    p = BASE_DIR / "build-stamp.txt"
+    if p.is_file():
+        return PlainTextResponse(p.read_text(encoding="utf-8").strip())
+    return PlainTextResponse("unknown")
 
 
 @app.post(
