@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Optional
+from typing import NoReturn, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -63,7 +63,7 @@ APP_DESCRIPTION = """
 
 ### Scheduled weekly digest
 - **`POST /internal/weekly-high-digest`** — Same scan as `/run-scan`, then emails a plain-text summary of **High** items. Auth: **`X-Cron-Secret`** = **`CRON_SECRET`**. Mail: either **`RESEND_API_KEY`** + **`WEEKLY_DIGEST_TO`** (no Gmail app password), or **`SMTP_*`** (any SMTP). For external cron (GitHub Actions, cron-job.org, etc.).
-- **In-process schedule:** set **`WEEKLY_DIGEST_SCHEDULE=true`** plus the same mail env vars; the server runs the digest **weekly** (default **Monday 09:00 UTC**; override with **`WEEKLY_DIGEST_WEEKDAY`**, **`WEEKLY_DIGEST_UTC_HOUR`**, **`WEEKLY_DIGEST_UTC_MINUTE`**). Requires **`SUPER_MIND_API_KEY`** or **`AI_BUILDER_TOKEN`**. Do not enable this **and** an external cron that hits the same endpoint, or you may get duplicate emails.
+- **In-process schedule:** set **`WEEKLY_DIGEST_SCHEDULE=true`** plus the same mail env vars; the server runs the digest **weekly** while the process stays up (default **Monday 09:00 UTC**). **Unreliable on hosts that stop idle instances** (e.g. Koyeb deep sleep)—there prefer **external POST cron** to **`/internal/weekly-high-digest`**. Do not enable in-process **and** external cron, or you may get duplicate emails.
 """
 
 TAGS_METADATA = [
@@ -875,6 +875,27 @@ def run_scan() -> RunScanResponse:
     return execute_run_scan()
 
 
+@app.get(
+    "/internal/weekly-high-digest",
+    tags=["Scheduled jobs"],
+    summary="Hint: digest is POST-only",
+    description=(
+        "Browsers and misconfigured crons often **GET** this path; the real job is **`POST`** only. "
+        "This route exists so you see **405** with a clear message instead of **404**."
+    ),
+    response_description="Always returns HTTP 405; use POST with X-Cron-Secret.",
+)
+def weekly_high_digest_get_hint() -> NoReturn:
+    raise HTTPException(
+        status_code=405,
+        detail=(
+            "Use POST (not GET) with header X-Cron-Secret matching CRON_SECRET. "
+            "Example: curl -X POST .../internal/weekly-high-digest -H 'X-Cron-Secret: ...' --max-time 900"
+        ),
+        headers={"Allow": "POST"},
+    )
+
+
 @app.post(
     "/internal/weekly-high-digest",
     response_model=WeeklyDigestResponse,
@@ -890,8 +911,10 @@ rated **High** (and Stage 1 areas/rationale).
 (Gmail inbox is fine as recipient; free tier uses `onboarding@resend.dev` as sender unless you set **`RESEND_FROM`** and verify a domain).
 (2) Or **`SMTP_*`** + **`WEEKLY_DIGEST_TO`** for any SMTP (Gmail needs an [App Password](https://support.google.com/accounts/answer/185833) if your account allows it).
 
-**Scheduling:** call this URL weekly from GitHub Actions, Google Cloud Scheduler, cron-job.org, etc.
+**Scheduling:** call this URL weekly with **POST** from GitHub Actions, Google Cloud Scheduler, cron-job.org, etc.
 Use an HTTP client timeout **≥ several minutes** (the scan is slow).
+
+**Hosting note:** platforms that **stop the process when idle** (e.g. Koyeb “deep sleep”) cannot run an in-process weekly timer while asleep—use **external POST cron** so each run **wakes** the service and completes the scan.
 """,
     responses={
         200: {"description": "Scan finished; email status in body."},
@@ -948,6 +971,10 @@ async def _startup_weekly_digest_schedule() -> None:
         wd,
         hh,
         mm,
+    )
+    _log.info(
+        "WEEKLY_DIGEST_SCHEDULE: if your host deep-sleeps idle instances, this thread stops too—"
+        "use external POST cron to /internal/weekly-high-digest instead."
     )
 
 
