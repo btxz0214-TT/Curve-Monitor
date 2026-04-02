@@ -1,5 +1,5 @@
-# Weekly HIGH summary: POST deployed /run-scan (wake Koyeb), then send email via Resend from GitHub Secrets.
-# No Resend/CRON env vars need to be set on AI Builders — only optional RUN_SCAN_SECRET if you use it.
+# Weekly HIGH summary: start async scan (short HTTP), poll job, then Resend from GitHub Secrets.
+# Avoids gateway 504 on long synchronous POST /run-scan (Koyeb/nginx timeouts).
 #
 # Repo → Settings → Secrets and variables → Actions:
 #   RADAR_BASE_URL      https://YOUR-SERVICE.ai-builders.space  (no trailing slash)
@@ -21,10 +21,9 @@ jobs:
   digest:
     runs-on: ubuntu-latest
     steps:
-      # v5+ uses Node 24 runtime (avoids Node 20 deprecation on ubuntu-latest).
       - uses: actions/checkout@v5
 
-      - name: POST /run-scan then Resend HIGH summary
+      - name: Async scan + poll + Resend HIGH summary
         env:
           RADAR_BASE_URL: ${{ secrets.RADAR_BASE_URL }}
           RADAR_URL: ${{ secrets.RADAR_URL }}
@@ -48,21 +47,50 @@ jobs:
             exit 1
           fi
           BASE="${BASE_RAW%/}"
+
+          SECRET_HDR=()
           if [ -n "${RUN_SCAN_SECRET:-}" ]; then
-            code=$(curl -sS -o response.json -w "%{http_code}" \
-              -X POST "$BASE/run-scan" \
-              -H "X-Run-Scan-Secret: $RUN_SCAN_SECRET" \
-              -H "Accept: application/json" \
-              --max-time 900)
-          else
-            code=$(curl -sS -o response.json -w "%{http_code}" \
-              -X POST "$BASE/run-scan" \
-              -H "Accept: application/json" \
-              --max-time 900)
+            SECRET_HDR=(-H "X-Run-Scan-Secret: $RUN_SCAN_SECRET")
           fi
-          echo "HTTP $code"
-          cat response.json
-          if [ "$code" != "200" ]; then
+
+          ac=$(curl -sS -o async.json -w "%{http_code}" \
+            -X POST "$BASE/run-scan/async" \
+            "${SECRET_HDR[@]}" \
+            -H "Accept: application/json" \
+            --max-time 120)
+          echo "POST /run-scan/async HTTP $ac"
+          cat async.json
+          if [ "$ac" != "200" ]; then
+            exit 1
+          fi
+          job_id=$(python3 -c "import json; print(json.load(open('async.json'))['job_id'])")
+          echo "job_id=$job_id"
+
+          got=""
+          for i in $(seq 1 120); do
+            pc=$(curl -sS -o poll.json -w "%{http_code}" \
+              "$BASE/run-scan/jobs/$job_id" \
+              -H "Accept: application/json" \
+              --max-time 90)
+            echo "poll $i HTTP $pc"
+            if [ "$pc" = "200" ]; then
+              cp poll.json response.json
+              got=1
+              break
+            fi
+            if [ "$pc" = "500" ]; then
+              cat poll.json
+              exit 1
+            fi
+            if [ "$pc" != "202" ]; then
+              cat poll.json
+              echo "Unexpected poll status"
+              exit 1
+            fi
+            sleep 15
+          done
+          if [ -z "$got" ]; then
+            echo "Timed out waiting for scan (max ~30 minutes)."
             exit 1
           fi
           python3 scripts/resend_weekly_high.py response.json

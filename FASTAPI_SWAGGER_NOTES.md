@@ -50,7 +50,7 @@ Then open `/docs` or `/` as needed.
 
 ## Weekly HIGH digest（推荐：GitHub + Resend，不占 Koyeb env）
 
-不在部署里配 Resend：**GitHub Actions** 定时 **`POST /run-scan`**（唤醒实例），再用仓库里的 **`scripts/resend_weekly_high.py`** 和 **GitHub Secrets** 发信。见 **`.github/workflows/weekly-radar-digest.yml`**。
+不在部署里配 Resend：**GitHub Actions** 定时 **`POST /run-scan/async`**（短连接，避免网关 **504**），轮询 **`GET /run-scan/jobs/{id}`** 直到 **200**，再用 **`scripts/resend_weekly_high.py`** + **GitHub Secrets** 发信。见 **`.github/workflows/weekly-radar-digest.yml`**。
 
 | GitHub Secret | 用途 |
 |---------------|------|

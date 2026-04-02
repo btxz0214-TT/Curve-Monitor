@@ -6,6 +6,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -14,7 +17,7 @@ import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from openai import BadRequestError, OpenAI
 from pydantic import BaseModel, ConfigDict, Field
@@ -25,6 +28,8 @@ load_dotenv(BASE_DIR / ".env")
 
 BACKGROUND_PATH = BASE_DIR / "background.md"
 STATIC_DIR = BASE_DIR / "static"
+JOBS_DIR = BASE_DIR / "job_store"
+_JOB_STALE_SEC = 48 * 3600
 
 MODEL = "supermind-agent-v1"
 API_BASE = "https://space.ai-builders.com/backend/v1"
@@ -55,7 +60,7 @@ APP_DESCRIPTION = """
 - **`POST /run-scan`** — Same pipeline for scripts or Swagger “Try it out”. **No request body.** Runs synchronously and can take **several minutes** (one broad call + one analysis per article URL).
 
 ### Weekly HIGH email (no secrets on the host)
-On **AI Builders / Koyeb**, avoid stuffing mail API keys into `env_vars`. Use the repo workflow **`.github/workflows/weekly-radar-digest.yml`**: it **`POST`s `/run-scan`** (wakes the instance), then sends mail via **Resend using GitHub Secrets** (`scripts/resend_weekly_high.py`).
+On **AI Builders / Koyeb**, avoid stuffing mail API keys into `env_vars`. Use **`.github/workflows/weekly-radar-digest.yml`**: it starts **`POST /run-scan/async`** (returns immediately; scan runs in-process), **polls `GET /run-scan/jobs/{id}`** until done (avoids gateway **504** on long synchronous `/run-scan`), then sends mail via **Resend** from GitHub Secrets (`scripts/resend_weekly_high.py`).
 
 Optional: set **`RUN_SCAN_SECRET`** on the deployed app and the same value in GitHub **`RUN_SCAN_SECRET`**; then callers must send header **`X-Run-Scan-Secret`**. The web UI can supply it in the optional field under the button. If unset, `/run-scan` stays open (fine for class demos; add the secret for a public URL).
 """
@@ -161,6 +166,14 @@ class RunScanResponse(BaseModel):
             ]
         }
     )
+
+
+class AsyncScanQueued(BaseModel):
+    """Immediate response from `POST /run-scan/async` before the scan finishes."""
+
+    job_id: str = Field(..., description="Opaque id for `GET /run-scan/jobs/{job_id}`.")
+    status: str = Field(default="pending", description="Always `pending` until the job record updates.")
+    poll_path: str = Field(..., description="Relative URL to poll for the final `RunScanResponse`.")
 
 
 app = FastAPI(
@@ -548,7 +561,7 @@ def coerce_broad_structured(data: dict) -> BroadStructured:
 
 
 def execute_run_scan() -> RunScanResponse:
-    """Full two-stage scan; shared by `/run-scan` and the weekly digest endpoint."""
+    """Full two-stage scan; shared by `/run-scan` and `/run-scan/async`."""
     background = read_background()
     client = get_client()
 
@@ -602,6 +615,49 @@ def _verify_run_scan_secret(x_secret: Optional[str]) -> None:
             status_code=401,
             detail="Invalid or missing X-Run-Scan-Secret header.",
         )
+
+
+def _job_file(job_id: str) -> Path:
+    return JOBS_DIR / f"{job_id}.json"
+
+
+def _write_job_record(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _prune_stale_jobs() -> None:
+    if not JOBS_DIR.is_dir():
+        return
+    cutoff = time.time() - _JOB_STALE_SEC
+    for p in JOBS_DIR.glob("*.json"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _async_scan_worker(job_id: str) -> None:
+    path = _job_file(job_id)
+    try:
+        result = execute_run_scan()
+        _write_job_record(
+            path,
+            {
+                "status": "done",
+                "result": result.model_dump(mode="json"),
+            },
+        )
+    except HTTPException as e:
+        d = e.detail
+        if not isinstance(d, str):
+            d = json.dumps(d, ensure_ascii=False)[:2000]
+        _write_job_record(path, {"status": "error", "detail": d})
+    except Exception as e:
+        _write_job_record(path, {"status": "error", "detail": str(e)[:2000]})
 
 
 @app.get(
@@ -670,3 +726,81 @@ def run_scan(
 ) -> RunScanResponse:
     _verify_run_scan_secret(x_run_scan_secret)
     return execute_run_scan()
+
+
+@app.post(
+    "/run-scan/async",
+    response_model=AsyncScanQueued,
+    tags=["Scan workflow"],
+    summary="Queue full scan (returns immediately)",
+    description=f"""
+Starts the same pipeline as **`POST /run-scan`** in a **background thread** and returns a **`job_id`**
+immediately. Poll **`GET /run-scan/jobs/{{job_id}}`** until you receive **200** with the normal scan JSON
+(or **500** if the scan failed).
+
+Use this from **GitHub Actions** or other clients behind a **short gateway timeout** (e.g. **504** on
+long synchronous `/run-scan`). Same optional **`RUN_SCAN_SECRET`** / **`X-Run-Scan-Secret`** as `/run-scan`.
+
+Jobs are stored on local disk under `{JOBS_DIR.name}/` (single-instance; typical for this MVP).
+""",
+    responses={
+        200: {"description": "Job accepted; scan is running."},
+        401: {"description": "`RUN_SCAN_SECRET` is set but header missing or invalid."},
+    },
+)
+def run_scan_async(
+    x_run_scan_secret: Optional[str] = Header(None, alias="X-Run-Scan-Secret"),
+) -> AsyncScanQueued:
+    _verify_run_scan_secret(x_run_scan_secret)
+    _prune_stale_jobs()
+    job_id = uuid.uuid4().hex
+    path = _job_file(job_id)
+    _write_job_record(path, {"status": "pending"})
+    t = threading.Thread(
+        target=_async_scan_worker,
+        args=(job_id,),
+        name=f"async-scan-{job_id[:8]}",
+        daemon=True,
+    )
+    t.start()
+    return AsyncScanQueued(
+        job_id=job_id,
+        status="pending",
+        poll_path=f"/run-scan/jobs/{job_id}",
+    )
+
+
+@app.get(
+    "/run-scan/jobs/{job_id}",
+    tags=["Scan workflow"],
+    summary="Poll async scan job",
+    description="""
+Returns **202** with `{{"status":"pending"}}` while the scan runs; **200** with the same body shape as
+`POST /run-scan` when finished; **404** if the id is unknown or expired (~48h).
+""",
+    responses={
+        200: {"description": "Scan finished successfully.", "model": RunScanResponse},
+        202: {"description": "Still running."},
+        404: {"description": "Invalid or unknown job_id."},
+        500: {"description": "Scan failed; `detail` explains."},
+    },
+)
+def run_scan_job_status(job_id: str):
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        raise HTTPException(status_code=404, detail="Invalid job_id")
+    path = _job_file(job_id)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Unknown or expired job")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Corrupt job record")
+
+    st = data.get("status")
+    if st == "pending":
+        return JSONResponse(status_code=202, content={"status": "pending"})
+    if st == "error":
+        raise HTTPException(status_code=500, detail=data.get("detail") or "Scan failed")
+    if st == "done" and "result" in data:
+        return RunScanResponse.model_validate(data["result"])
+    raise HTTPException(status_code=500, detail="Invalid job record")
