@@ -1,0 +1,49 @@
+# Weekly trigger for Strategic Information Radar HIGH-summary email (Resend/SMTP).
+#
+# Repo → Settings → Secrets and variables → Actions, add:
+#   RADAR_URL           full URL, e.g. https://YOUR-SERVICE.ai-builders.space/internal/weekly-high-digest
+#   RADAR_CRON_SECRET   same value as CRON_SECRET on the deployed app
+#
+# The deployed container must have CRON_SECRET, SUPER_MIND_API_KEY, RESEND_API_KEY, WEEKLY_DIGEST_TO (and optional RESEND_FROM).
+
+name: Weekly radar HIGH digest
+
+on:
+  schedule:
+    # Mondays 09:00 UTC — change cron as needed
+    - cron: "0 9 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /internal/weekly-high-digest
+        env:
+          RADAR_URL: ${{ secrets.RADAR_URL }}
+          RADAR_CRON_SECRET: ${{ secrets.RADAR_CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RADAR_URL:-}" ] || [ -z "${RADAR_CRON_SECRET:-}" ]; then
+            echo "Missing GitHub Actions secrets: RADAR_URL and RADAR_CRON_SECRET"
+            exit 1
+          fi
+          code=$(curl -sS -o response.json -w "%{http_code}" \
+            -X POST "$RADAR_URL" \
+            -H "X-Cron-Secret: $RADAR_CRON_SECRET" \
+            -H "Accept: application/json" \
+            --max-time 900)
+          echo "HTTP $code"
+          cat response.json
+          if [ "$code" != "200" ]; then
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, sys
+          with open("response.json") as f:
+              d = json.load(f)
+          if not d.get("email_sent"):
+              print("email_sent is false:", d.get("email_error"))
+              sys.exit(1)
+          print("OK: high_importance_count =", d.get("high_importance_count"))
+          PY

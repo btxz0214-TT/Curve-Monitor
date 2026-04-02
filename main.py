@@ -4,10 +4,14 @@ Strategic Information Radar — FastAPI backend (Two-Stage Scan).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import smtplib
 import ssl
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Optional
@@ -58,7 +62,8 @@ APP_DESCRIPTION = """
 - **`POST /run-scan`** — Same pipeline for scripts or Swagger “Try it out”. **No request body.** Runs synchronously and can take **several minutes** (one broad call + one analysis per article URL).
 
 ### Scheduled weekly digest
-- **`POST /internal/weekly-high-digest`** — Same scan as `/run-scan`, then emails a plain-text summary of **High** items. Auth: **`X-Cron-Secret`** = **`CRON_SECRET`**. Mail: either **`RESEND_API_KEY`** + **`WEEKLY_DIGEST_TO`** (no Gmail app password), or **`SMTP_*`** (any SMTP). Intended for external cron.
+- **`POST /internal/weekly-high-digest`** — Same scan as `/run-scan`, then emails a plain-text summary of **High** items. Auth: **`X-Cron-Secret`** = **`CRON_SECRET`**. Mail: either **`RESEND_API_KEY`** + **`WEEKLY_DIGEST_TO`** (no Gmail app password), or **`SMTP_*`** (any SMTP). For external cron (GitHub Actions, cron-job.org, etc.).
+- **In-process schedule:** set **`WEEKLY_DIGEST_SCHEDULE=true`** plus the same mail env vars; the server runs the digest **weekly** (default **Monday 09:00 UTC**; override with **`WEEKLY_DIGEST_WEEKDAY`**, **`WEEKLY_DIGEST_UTC_HOUR`**, **`WEEKLY_DIGEST_UTC_MINUTE`**). Requires **`SUPER_MIND_API_KEY`** or **`AI_BUILDER_TOKEN`**. Do not enable this **and** an external cron that hits the same endpoint, or you may get duplicate emails.
 """
 
 TAGS_METADATA = [
@@ -731,6 +736,83 @@ def send_weekly_high_digest_email(result: RunScanResponse) -> tuple[bool, Option
     return True, None
 
 
+_log = logging.getLogger("uvicorn.error")
+
+
+def _env_truthy(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _api_key_configured() -> bool:
+    return bool((os.getenv("SUPER_MIND_API_KEY") or os.getenv("AI_BUILDER_TOKEN") or "").strip())
+
+
+def _mail_ready_for_digest() -> bool:
+    if (os.getenv("RESEND_API_KEY") or "").strip():
+        return bool((os.getenv("WEEKLY_DIGEST_TO") or "").strip())
+    host = (os.getenv("SMTP_HOST") or "").strip()
+    user = (os.getenv("SMTP_USER") or "").strip()
+    password = (os.getenv("SMTP_PASSWORD") or "").strip()
+    to_addr = (os.getenv("WEEKLY_DIGEST_TO") or user or "").strip()
+    return bool(host and user and password and to_addr)
+
+
+def _next_weekly_run_utc(
+    now: datetime, weekday: int, hour: int, minute: int
+) -> datetime:
+    """Next occurrence of weekday at hour:minute in UTC (weekday: 0=Monday .. 6=Sunday)."""
+    now = now.astimezone(timezone.utc)
+    days_since = (now.weekday() - weekday) % 7
+    candidate_date = (now.date() - timedelta(days=days_since))
+    slot = datetime(
+        candidate_date.year,
+        candidate_date.month,
+        candidate_date.day,
+        hour,
+        minute,
+        tzinfo=timezone.utc,
+    )
+    if now <= slot:
+        return slot
+    return slot + timedelta(days=7)
+
+
+def _weekly_digest_scheduler_loop(stop: threading.Event) -> None:
+    try:
+        weekday = int(os.getenv("WEEKLY_DIGEST_WEEKDAY") or "0")
+        hour = int(os.getenv("WEEKLY_DIGEST_UTC_HOUR") or "9")
+        minute = int(os.getenv("WEEKLY_DIGEST_UTC_MINUTE") or "0")
+    except ValueError:
+        _log.warning("Invalid WEEKLY_DIGEST_* schedule integers; using Mon 09:00 UTC")
+        weekday, hour, minute = 0, 9, 0
+
+    while not stop.is_set():
+        now = datetime.now(timezone.utc)
+        target = _next_weekly_run_utc(now, weekday, hour, minute)
+        sleep_s = max(1.0, (target - now).total_seconds())
+        while sleep_s > 0 and not stop.is_set():
+            chunk = min(sleep_s, 3600.0)
+            if stop.wait(timeout=chunk):
+                return
+            sleep_s -= chunk
+        if stop.is_set():
+            return
+        try:
+            _log.info("WEEKLY_DIGEST_SCHEDULE: starting scan + email")
+            result = execute_run_scan()
+            sent, err = send_weekly_high_digest_email(result)
+            if sent:
+                _log.info("WEEKLY_DIGEST_SCHEDULE: email sent")
+            else:
+                _log.warning("WEEKLY_DIGEST_SCHEDULE: email not sent: %s", err)
+        except Exception:
+            _log.exception("WEEKLY_DIGEST_SCHEDULE: run failed")
+        time.sleep(60)
+
+
+_weekly_digest_stop: Optional[threading.Event] = None
+
+
 @app.get(
     "/",
     tags=["Web UI"],
@@ -830,3 +912,48 @@ def weekly_high_digest(
         email_sent=sent,
         email_error=err,
     )
+
+
+@app.on_event("startup")
+async def _startup_weekly_digest_schedule() -> None:
+    global _weekly_digest_stop
+    if not _env_truthy("WEEKLY_DIGEST_SCHEDULE"):
+        return
+    if not _api_key_configured():
+        _log.warning(
+            "WEEKLY_DIGEST_SCHEDULE set but no SUPER_MIND_API_KEY / AI_BUILDER_TOKEN; scheduler not started"
+        )
+        return
+    if not _mail_ready_for_digest():
+        _log.warning(
+            "WEEKLY_DIGEST_SCHEDULE set but mail env incomplete (Resend+WEEKLY_DIGEST_TO or SMTP); "
+            "scheduler not started"
+        )
+        return
+    _weekly_digest_stop = threading.Event()
+    threading.Thread(
+        target=_weekly_digest_scheduler_loop,
+        args=(_weekly_digest_stop,),
+        name="weekly-digest-scheduler",
+        daemon=True,
+    ).start()
+    try:
+        wd = int(os.getenv("WEEKLY_DIGEST_WEEKDAY") or "0")
+        hh = int(os.getenv("WEEKLY_DIGEST_UTC_HOUR") or "9")
+        mm = int(os.getenv("WEEKLY_DIGEST_UTC_MINUTE") or "0")
+    except ValueError:
+        wd, hh, mm = 0, 9, 0
+    _log.info(
+        "WEEKLY_DIGEST_SCHEDULE: background thread started (weekday=%d %02d:%02d UTC)",
+        wd,
+        hh,
+        mm,
+    )
+
+
+@app.on_event("shutdown")
+async def _shutdown_weekly_digest_schedule() -> None:
+    global _weekly_digest_stop
+    if _weekly_digest_stop is not None:
+        _weekly_digest_stop.set()
+        _weekly_digest_stop = None

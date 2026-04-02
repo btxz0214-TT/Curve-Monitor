@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 import httpx
-from dotenv import dotenv_values
+from dotenv import dotenv_values, load_dotenv
 
 BASE = Path(__file__).resolve().parent
 API = "https://space.ai-builders.com/backend/v1/deployments"
@@ -35,6 +35,10 @@ DOTENV_MERGE_KEYS = (
     "RESEND_API_KEY",
     "WEEKLY_DIGEST_TO",
     "RESEND_FROM",
+    "WEEKLY_DIGEST_SCHEDULE",
+    "WEEKLY_DIGEST_WEEKDAY",
+    "WEEKLY_DIGEST_UTC_HOUR",
+    "WEEKLY_DIGEST_UTC_MINUTE",
 )
 
 
@@ -51,6 +55,9 @@ def main() -> None:
         help="Print JSON body only; do not POST.",
     )
     args = p.parse_args()
+
+    # So `SUPER_MIND_API_KEY` in `.env` works without manually exporting it.
+    load_dotenv(BASE / ".env")
 
     if not CONFIG_PATH.is_file():
         print(f"Missing {CONFIG_PATH.name}. Copy {EXAMPLE_PATH.name} and edit:", file=sys.stderr)
