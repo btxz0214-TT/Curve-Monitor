@@ -2,9 +2,5 @@
   "repo_url": "https://github.com/btxz0214-TT/Curve-Monitor",
   "service_name": "btxz-chat",
   "branch": "main",
-  "env_vars": {
-    "CRON_SECRET": "long-random-string-same-as-cron-header",
-    "RESEND_API_KEY": "re_xxxxxxxx",
-    "WEEKLY_DIGEST_TO": "you@gmail.com"
-  }
+  "env_vars": {}
 }

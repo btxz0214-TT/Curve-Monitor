@@ -131,6 +131,14 @@
   <div class="wrap">
     <h1>Strategic Information Radar</h1>
     <p class="sub">Two-stage scan: broad survey from <code>background.md</code>, then deep-dive on each article URL.</p>
+    <details class="sub" style="margin-bottom:1rem;">
+      <summary style="cursor:pointer;color:var(--muted);">Optional: scan lock</summary>
+      <p style="margin:0.5rem 0 0;font-size:0.85rem;color:var(--muted);">
+        If the server has <code>RUN_SCAN_SECRET</code> set, paste the same value here (stored only in this browser session).
+      </p>
+      <input type="password" id="runScanSecret" placeholder="X-Run-Scan-Secret" autocomplete="off"
+        style="margin-top:0.5rem;width:100%;max-width:28rem;padding:0.5rem;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);" />
+    </details>
     <button type="button" id="scanBtn">Start Scan</button>
     <p class="status" id="status"></p>
 
@@ -147,6 +155,7 @@
 
   <script>
     const scanBtn = document.getElementById("scanBtn");
+    const runScanSecretEl = document.getElementById("runScanSecret");
     const statusEl = document.getElementById("status");
     const broadSection = document.getElementById("broadSection");
     const broadContent = document.getElementById("broadContent");
@@ -225,7 +234,10 @@
       deepSection.style.display = "none";
 
       try {
-        const res = await fetch("/run-scan", { method: "POST", headers: { Accept: "application/json" } });
+        const headers = { Accept: "application/json" };
+        const lock = (runScanSecretEl && runScanSecretEl.value || "").trim();
+        if (lock) headers["X-Run-Scan-Secret"] = lock;
+        const res = await fetch("/run-scan", { method: "POST", headers });
         const body = await res.json().catch(() => ({}));
         if (!res.ok) {
           const detail = body.detail || res.statusText || "Request failed";

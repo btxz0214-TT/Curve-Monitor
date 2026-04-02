@@ -4,17 +4,10 @@ Strategic Information Radar — FastAPI backend (Two-Stage Scan).
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
-import smtplib
-import ssl
-import threading
-import time
-from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -61,9 +54,10 @@ APP_DESCRIPTION = """
 - **`GET /`** — Human-facing page with a **Start Scan** button (same workflow as `POST /run-scan`).
 - **`POST /run-scan`** — Same pipeline for scripts or Swagger “Try it out”. **No request body.** Runs synchronously and can take **several minutes** (one broad call + one analysis per article URL).
 
-### Scheduled weekly digest
-- **`POST /internal/weekly-high-digest`** — Same scan as `/run-scan`, then emails a plain-text summary of **High** items. Auth: **`X-Cron-Secret`** = **`CRON_SECRET`**. Mail: either **`RESEND_API_KEY`** + **`WEEKLY_DIGEST_TO`** (no Gmail app password), or **`SMTP_*`** (any SMTP). For external cron (GitHub Actions, cron-job.org, etc.).
-- **In-process schedule:** set **`WEEKLY_DIGEST_SCHEDULE=true`** plus the same mail env vars; the server runs the digest **weekly** while the process stays up (default **Monday 09:00 UTC**). **Unreliable on hosts that stop idle instances** (e.g. Koyeb deep sleep)—there prefer **external POST cron** to **`/internal/weekly-high-digest`**. Do not enable in-process **and** external cron, or you may get duplicate emails.
+### Weekly HIGH email (no secrets on the host)
+On **AI Builders / Koyeb**, avoid stuffing mail API keys into `env_vars`. Use the repo workflow **`.github/workflows/weekly-radar-digest.yml`**: it **`POST`s `/run-scan`** (wakes the instance), then sends mail via **Resend using GitHub Secrets** (`scripts/resend_weekly_high.py`).
+
+Optional: set **`RUN_SCAN_SECRET`** on the deployed app and the same value in GitHub **`RUN_SCAN_SECRET`**; then callers must send header **`X-Run-Scan-Secret`**. The web UI can supply it in the optional field under the button. If unset, `/run-scan` stays open (fine for class demos; add the secret for a public URL).
 """
 
 TAGS_METADATA = [
@@ -74,10 +68,6 @@ TAGS_METADATA = [
     {
         "name": "Scan workflow",
         "description": "Endpoints that execute the two-stage scan against `background.md` and return structured JSON.",
-    },
-    {
-        "name": "Scheduled jobs",
-        "description": "Secret-protected endpoints for cron schedulers (weekly HIGH summary email).",
     },
 ]
 
@@ -128,24 +118,6 @@ class DeepDiveItem(BaseModel):
     fetch_error: Optional[str] = Field(
         default=None,
         description="If the page could not be downloaded or parsed, an error message; otherwise null.",
-    )
-
-
-class WeeklyDigestResponse(BaseModel):
-    """Result of `POST /internal/weekly-high-digest` after scan + optional email."""
-
-    high_importance_count: int = Field(
-        ...,
-        ge=0,
-        description="Number of deep-dive items rated High.",
-    )
-    email_sent: bool = Field(
-        ...,
-        description="True if an email was sent (Resend API or SMTP).",
-    )
-    email_error: Optional[str] = Field(
-        default=None,
-        description="If email was not sent or failed, a short reason.",
     )
 
 
@@ -621,196 +593,15 @@ def execute_run_scan() -> RunScanResponse:
     return RunScanResponse(broad_scan_report=report, deep_dive_report=items)
 
 
-def _verify_cron_secret(x_cron_secret: Optional[str]) -> None:
-    expected = (os.getenv("CRON_SECRET") or "").strip()
+def _verify_run_scan_secret(x_secret: Optional[str]) -> None:
+    expected = (os.getenv("RUN_SCAN_SECRET") or "").strip()
     if not expected:
+        return
+    if not x_secret or x_secret != expected:
         raise HTTPException(
-            status_code=503,
-            detail="CRON_SECRET is not set; weekly digest endpoint is disabled.",
+            status_code=401,
+            detail="Invalid or missing X-Run-Scan-Secret header.",
         )
-    if not x_cron_secret or x_cron_secret != expected:
-        raise HTTPException(status_code=401, detail="Invalid or missing X-Cron-Secret header.")
-
-
-def _build_high_digest_body(result: RunScanResponse) -> tuple[str, str]:
-    """Return (subject, plain_text_body)."""
-    highs = [i for i in result.deep_dive_report if i.importance == "High"]
-    lines = [
-        "Strategic Information Radar — weekly HIGH importance summary",
-        "",
-        f"High-rated items: {len(highs)}",
-        "",
-    ]
-    if not highs:
-        lines.append("No items were rated High this run.")
-    else:
-        for n, item in enumerate(highs, start=1):
-            lines.append(f"--- {n}. {item.source_url}")
-            lines.append(f"Summary: {item.summary}")
-            lines.append(f"Reasoning: {item.reasoning}")
-            if item.fetch_error:
-                lines.append(f"Fetch note: {item.fetch_error}")
-            lines.append("")
-    broad = result.broad_scan_report.structured
-    lines.append("--- Stage 1 (context)")
-    lines.append("Areas: " + "; ".join(broad.areas) if broad.areas else "(none)")
-    lines.append(f"Rationale: {broad.rationale}")
-    subject = (
-        f"[Radar] {len(highs)} HIGH risk item(s)"
-        if highs
-        else "[Radar] Weekly scan — no HIGH items"
-    )
-    return subject, "\n".join(lines)
-
-
-def send_weekly_high_digest_email(result: RunScanResponse) -> tuple[bool, Optional[str]]:
-    """
-    Send plain-text digest. Prefer Resend if RESEND_API_KEY is set (no SMTP / Gmail app password).
-    Otherwise SMTP: SMTP_HOST, SMTP_USER, SMTP_PASSWORD, WEEKLY_DIGEST_TO (default recipient: SMTP_USER).
-    """
-    subject, body = _build_high_digest_body(result)
-    to_addr = (os.getenv("WEEKLY_DIGEST_TO") or os.getenv("SMTP_USER") or "").strip()
-
-    resend_key = (os.getenv("RESEND_API_KEY") or "").strip()
-    if resend_key:
-        if not to_addr:
-            return False, "WEEKLY_DIGEST_TO is required when using RESEND_API_KEY"
-        from_addr = (os.getenv("RESEND_FROM") or "Radar <onboarding@resend.dev>").strip()
-        try:
-            r = httpx.post(
-                "https://api.resend.com/emails",
-                headers={
-                    "Authorization": f"Bearer {resend_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "from": from_addr,
-                    "to": [to_addr],
-                    "subject": subject,
-                    "text": body,
-                },
-                timeout=30.0,
-            )
-            if r.status_code >= 400:
-                return False, (r.text or r.reason_phrase or "Resend error")[:500]
-        except Exception as e:
-            return False, str(e)[:500]
-        return True, None
-
-    host = (os.getenv("SMTP_HOST") or "").strip()
-    user = (os.getenv("SMTP_USER") or "").strip()
-    password = (os.getenv("SMTP_PASSWORD") or "").strip()
-    if not to_addr:
-        to_addr = user
-    if not host or not user or not password or not to_addr:
-        return (
-            False,
-            "Set RESEND_API_KEY + WEEKLY_DIGEST_TO (see Resend.com), or full SMTP_* + WEEKLY_DIGEST_TO",
-        )
-
-    port_s = (os.getenv("SMTP_PORT") or "587").strip()
-    try:
-        port = int(port_s)
-    except ValueError:
-        return False, f"Invalid SMTP_PORT: {port_s!r}"
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = user
-    msg["To"] = to_addr
-    msg.set_content(body)
-
-    try:
-        if port == 465:
-            context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(host, port, context=context) as smtp:
-                smtp.login(user, password)
-                smtp.send_message(msg)
-        else:
-            with smtplib.SMTP(host, port) as smtp:
-                smtp.starttls(context=ssl.create_default_context())
-                smtp.login(user, password)
-                smtp.send_message(msg)
-    except Exception as e:
-        return False, str(e)[:500]
-    return True, None
-
-
-_log = logging.getLogger("uvicorn.error")
-
-
-def _env_truthy(name: str) -> bool:
-    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _api_key_configured() -> bool:
-    return bool((os.getenv("SUPER_MIND_API_KEY") or os.getenv("AI_BUILDER_TOKEN") or "").strip())
-
-
-def _mail_ready_for_digest() -> bool:
-    if (os.getenv("RESEND_API_KEY") or "").strip():
-        return bool((os.getenv("WEEKLY_DIGEST_TO") or "").strip())
-    host = (os.getenv("SMTP_HOST") or "").strip()
-    user = (os.getenv("SMTP_USER") or "").strip()
-    password = (os.getenv("SMTP_PASSWORD") or "").strip()
-    to_addr = (os.getenv("WEEKLY_DIGEST_TO") or user or "").strip()
-    return bool(host and user and password and to_addr)
-
-
-def _next_weekly_run_utc(
-    now: datetime, weekday: int, hour: int, minute: int
-) -> datetime:
-    """Next occurrence of weekday at hour:minute in UTC (weekday: 0=Monday .. 6=Sunday)."""
-    now = now.astimezone(timezone.utc)
-    days_since = (now.weekday() - weekday) % 7
-    candidate_date = (now.date() - timedelta(days=days_since))
-    slot = datetime(
-        candidate_date.year,
-        candidate_date.month,
-        candidate_date.day,
-        hour,
-        minute,
-        tzinfo=timezone.utc,
-    )
-    if now <= slot:
-        return slot
-    return slot + timedelta(days=7)
-
-
-def _weekly_digest_scheduler_loop(stop: threading.Event) -> None:
-    try:
-        weekday = int(os.getenv("WEEKLY_DIGEST_WEEKDAY") or "0")
-        hour = int(os.getenv("WEEKLY_DIGEST_UTC_HOUR") or "9")
-        minute = int(os.getenv("WEEKLY_DIGEST_UTC_MINUTE") or "0")
-    except ValueError:
-        _log.warning("Invalid WEEKLY_DIGEST_* schedule integers; using Mon 09:00 UTC")
-        weekday, hour, minute = 0, 9, 0
-
-    while not stop.is_set():
-        now = datetime.now(timezone.utc)
-        target = _next_weekly_run_utc(now, weekday, hour, minute)
-        sleep_s = max(1.0, (target - now).total_seconds())
-        while sleep_s > 0 and not stop.is_set():
-            chunk = min(sleep_s, 3600.0)
-            if stop.wait(timeout=chunk):
-                return
-            sleep_s -= chunk
-        if stop.is_set():
-            return
-        try:
-            _log.info("WEEKLY_DIGEST_SCHEDULE: starting scan + email")
-            result = execute_run_scan()
-            sent, err = send_weekly_high_digest_email(result)
-            if sent:
-                _log.info("WEEKLY_DIGEST_SCHEDULE: email sent")
-            else:
-                _log.warning("WEEKLY_DIGEST_SCHEDULE: email not sent: %s", err)
-        except Exception:
-            _log.exception("WEEKLY_DIGEST_SCHEDULE: run failed")
-        time.sleep(60)
-
-
-_weekly_digest_stop: Optional[threading.Event] = None
 
 
 @app.get(
@@ -862,125 +653,20 @@ Execute the **Strategic Information Radar** pipeline synchronously.
 
 **Time:** often **several minutes** (network + multiple LLM calls).
 
-**Errors:** `500` if `SUPER_MIND_API_KEY` is missing or `background.md` is missing.
+**Optional lock:** if environment variable **`RUN_SCAN_SECRET`** is set, send header **`X-Run-Scan-Secret`** with the same value (GitHub Actions and the web UI optional field).
+
+**Errors:** `500` if `SUPER_MIND_API_KEY` / `AI_BUILDER_TOKEN` is missing or `background.md` is missing. `401` if `RUN_SCAN_SECRET` is set and the header is wrong or missing.
 """,
     responses={
         200: {"description": "Broad Scan Report and Deep Dive Report as JSON (see response schema)."},
+        401: {"description": "`RUN_SCAN_SECRET` is set but header missing or invalid."},
         500: {
             "description": "Missing API key, missing `background.md`, or upstream model/API failure.",
         },
     },
 )
-def run_scan() -> RunScanResponse:
+def run_scan(
+    x_run_scan_secret: Optional[str] = Header(None, alias="X-Run-Scan-Secret"),
+) -> RunScanResponse:
+    _verify_run_scan_secret(x_run_scan_secret)
     return execute_run_scan()
-
-
-@app.get(
-    "/internal/weekly-high-digest",
-    tags=["Scheduled jobs"],
-    summary="Hint: digest is POST-only",
-    description=(
-        "Browsers and misconfigured crons often **GET** this path; the real job is **`POST`** only. "
-        "This route exists so you see **405** with a clear message instead of **404**."
-    ),
-    response_description="Always returns HTTP 405; use POST with X-Cron-Secret.",
-)
-def weekly_high_digest_get_hint() -> NoReturn:
-    raise HTTPException(
-        status_code=405,
-        detail=(
-            "Use POST (not GET) with header X-Cron-Secret matching CRON_SECRET. "
-            "Example: curl -X POST .../internal/weekly-high-digest -H 'X-Cron-Secret: ...' --max-time 900"
-        ),
-        headers={"Allow": "POST"},
-    )
-
-
-@app.post(
-    "/internal/weekly-high-digest",
-    response_model=WeeklyDigestResponse,
-    tags=["Scheduled jobs"],
-    summary="Cron: run scan and email HIGH items",
-    description="""
-Runs the same pipeline as **`POST /run-scan`**, then sends a **plain-text email** summarizing items
-rated **High** (and Stage 1 areas/rationale).
-
-**Auth:** header **`X-Cron-Secret`** must equal environment variable **`CRON_SECRET`**.
-
-**Email (pick one):** (1) **`RESEND_API_KEY`** from [resend.com](https://resend.com) plus **`WEEKLY_DIGEST_TO`**
-(Gmail inbox is fine as recipient; free tier uses `onboarding@resend.dev` as sender unless you set **`RESEND_FROM`** and verify a domain).
-(2) Or **`SMTP_*`** + **`WEEKLY_DIGEST_TO`** for any SMTP (Gmail needs an [App Password](https://support.google.com/accounts/answer/185833) if your account allows it).
-
-**Scheduling:** call this URL weekly with **POST** from GitHub Actions, Google Cloud Scheduler, cron-job.org, etc.
-Use an HTTP client timeout **≥ several minutes** (the scan is slow).
-
-**Hosting note:** platforms that **stop the process when idle** (e.g. Koyeb “deep sleep”) cannot run an in-process weekly timer while asleep—use **external POST cron** so each run **wakes** the service and completes the scan.
-""",
-    responses={
-        200: {"description": "Scan finished; email status in body."},
-        401: {"description": "Missing or wrong `X-Cron-Secret`."},
-        503: {"description": "`CRON_SECRET` not configured on server."},
-        500: {"description": "Same as `/run-scan` (missing API key, background, or model errors)."},
-    },
-)
-def weekly_high_digest(
-    x_cron_secret: Optional[str] = Header(None, alias="X-Cron-Secret"),
-) -> WeeklyDigestResponse:
-    _verify_cron_secret(x_cron_secret)
-    result = execute_run_scan()
-    highs = [i for i in result.deep_dive_report if i.importance == "High"]
-    sent, err = send_weekly_high_digest_email(result)
-    return WeeklyDigestResponse(
-        high_importance_count=len(highs),
-        email_sent=sent,
-        email_error=err,
-    )
-
-
-@app.on_event("startup")
-async def _startup_weekly_digest_schedule() -> None:
-    global _weekly_digest_stop
-    if not _env_truthy("WEEKLY_DIGEST_SCHEDULE"):
-        return
-    if not _api_key_configured():
-        _log.warning(
-            "WEEKLY_DIGEST_SCHEDULE set but no SUPER_MIND_API_KEY / AI_BUILDER_TOKEN; scheduler not started"
-        )
-        return
-    if not _mail_ready_for_digest():
-        _log.warning(
-            "WEEKLY_DIGEST_SCHEDULE set but mail env incomplete (Resend+WEEKLY_DIGEST_TO or SMTP); "
-            "scheduler not started"
-        )
-        return
-    _weekly_digest_stop = threading.Event()
-    threading.Thread(
-        target=_weekly_digest_scheduler_loop,
-        args=(_weekly_digest_stop,),
-        name="weekly-digest-scheduler",
-        daemon=True,
-    ).start()
-    try:
-        wd = int(os.getenv("WEEKLY_DIGEST_WEEKDAY") or "0")
-        hh = int(os.getenv("WEEKLY_DIGEST_UTC_HOUR") or "9")
-        mm = int(os.getenv("WEEKLY_DIGEST_UTC_MINUTE") or "0")
-    except ValueError:
-        wd, hh, mm = 0, 9, 0
-    _log.info(
-        "WEEKLY_DIGEST_SCHEDULE: background thread started (weekday=%d %02d:%02d UTC)",
-        wd,
-        hh,
-        mm,
-    )
-    _log.info(
-        "WEEKLY_DIGEST_SCHEDULE: if your host deep-sleeps idle instances, this thread stops too—"
-        "use external POST cron to /internal/weekly-high-digest instead."
-    )
-
-
-@app.on_event("shutdown")
-async def _shutdown_weekly_digest_schedule() -> None:
-    global _weekly_digest_stop
-    if _weekly_digest_stop is not None:
-        _weekly_digest_stop.set()
-        _weekly_digest_stop = None

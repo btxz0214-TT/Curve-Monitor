@@ -9,7 +9,7 @@ Requires:
   - deploy-config.json (copy from deploy-config.example.json): repo_url, service_name, branch, env_vars.
 
 Optional:
-  --merge-dotenv  Merge CRON_SECRET, RESEND_*, WEEKLY_DIGEST_TO from .env into env_vars (max 20 keys total).
+  --merge-dotenv  Merge RUN_SCAN_SECRET from .env into env_vars (optional lock for POST /run-scan; max 20 keys total).
 
 env_vars are forwarded to Koyeb only; the platform does not store them (see OpenAPI DeploymentCreateRequest).
 """
@@ -29,17 +29,8 @@ API = "https://space.ai-builders.com/backend/v1/deployments"
 CONFIG_PATH = BASE / "deploy-config.json"
 EXAMPLE_PATH = BASE / "deploy-config.example.json"
 
-# Keys pulled from .env when using --merge-dotenv (weekly digest + optional from address).
-DOTENV_MERGE_KEYS = (
-    "CRON_SECRET",
-    "RESEND_API_KEY",
-    "WEEKLY_DIGEST_TO",
-    "RESEND_FROM",
-    "WEEKLY_DIGEST_SCHEDULE",
-    "WEEKLY_DIGEST_WEEKDAY",
-    "WEEKLY_DIGEST_UTC_HOUR",
-    "WEEKLY_DIGEST_UTC_MINUTE",
-)
+# Optional: single secret so POST /run-scan is not public. Mail keys live in GitHub Actions, not Koyeb.
+DOTENV_MERGE_KEYS = ("RUN_SCAN_SECRET",)
 
 
 def main() -> None:

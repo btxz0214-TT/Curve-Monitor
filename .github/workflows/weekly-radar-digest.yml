@@ -1,49 +1,56 @@
-# Weekly trigger for Strategic Information Radar HIGH-summary email (Resend/SMTP).
+# Weekly HIGH summary: POST deployed /run-scan (wake Koyeb), then send email via Resend from GitHub Secrets.
+# No Resend/CRON env vars need to be set on AI Builders — only optional RUN_SCAN_SECRET if you use it.
 #
-# Repo → Settings → Secrets and variables → Actions, add:
-#   RADAR_URL           full URL, e.g. https://YOUR-SERVICE.ai-builders.space/internal/weekly-high-digest
-#   RADAR_CRON_SECRET   same value as CRON_SECRET on the deployed app
-#
-# The deployed container must have CRON_SECRET, SUPER_MIND_API_KEY, RESEND_API_KEY, WEEKLY_DIGEST_TO (and optional RESEND_FROM).
+# Repo → Settings → Secrets and variables → Actions:
+#   RADAR_BASE_URL      https://YOUR-SERVICE.ai-builders.space  (no trailing slash)
+#   RESEND_API_KEY
+#   WEEKLY_DIGEST_TO
+# Optional:
+#   RESEND_FROM         e.g. Radar <onboarding@resend.dev>
+#   RUN_SCAN_SECRET     must match RUN_SCAN_SECRET on the deployed app (if you set it there)
 
 name: Weekly radar HIGH digest
 
 on:
   schedule:
-    # Mondays 09:00 UTC — change cron as needed
-    - cron: "0 9 * * 1"
+    - cron: "0 9 * * 1" # Mondays 09:00 UTC
   workflow_dispatch: {}
 
 jobs:
   digest:
     runs-on: ubuntu-latest
     steps:
-      - name: POST /internal/weekly-high-digest
+      - uses: actions/checkout@v4
+
+      - name: POST /run-scan then Resend HIGH summary
         env:
-          RADAR_URL: ${{ secrets.RADAR_URL }}
-          RADAR_CRON_SECRET: ${{ secrets.RADAR_CRON_SECRET }}
+          RADAR_BASE_URL: ${{ secrets.RADAR_BASE_URL }}
+          RUN_SCAN_SECRET: ${{ secrets.RUN_SCAN_SECRET }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          WEEKLY_DIGEST_TO: ${{ secrets.WEEKLY_DIGEST_TO }}
+          RESEND_FROM: ${{ secrets.RESEND_FROM }}
         run: |
           set -euo pipefail
-          if [ -z "${RADAR_URL:-}" ] || [ -z "${RADAR_CRON_SECRET:-}" ]; then
-            echo "Missing GitHub Actions secrets: RADAR_URL and RADAR_CRON_SECRET"
+          if [ -z "${RADAR_BASE_URL:-}" ] || [ -z "${RESEND_API_KEY:-}" ] || [ -z "${WEEKLY_DIGEST_TO:-}" ]; then
+            echo "Set GitHub Actions secrets: RADAR_BASE_URL, RESEND_API_KEY, WEEKLY_DIGEST_TO"
             exit 1
           fi
-          code=$(curl -sS -o response.json -w "%{http_code}" \
-            -X POST "$RADAR_URL" \
-            -H "X-Cron-Secret: $RADAR_CRON_SECRET" \
-            -H "Accept: application/json" \
-            --max-time 900)
+          BASE="${RADAR_BASE_URL%/}"
+          if [ -n "${RUN_SCAN_SECRET:-}" ]; then
+            code=$(curl -sS -o response.json -w "%{http_code}" \
+              -X POST "$BASE/run-scan" \
+              -H "X-Run-Scan-Secret: $RUN_SCAN_SECRET" \
+              -H "Accept: application/json" \
+              --max-time 900)
+          else
+            code=$(curl -sS -o response.json -w "%{http_code}" \
+              -X POST "$BASE/run-scan" \
+              -H "Accept: application/json" \
+              --max-time 900)
+          fi
           echo "HTTP $code"
           cat response.json
           if [ "$code" != "200" ]; then
             exit 1
           fi
-          python3 - <<'PY'
-          import json, sys
-          with open("response.json") as f:
-              d = json.load(f)
-          if not d.get("email_sent"):
-              print("email_sent is false:", d.get("email_error"))
-              sys.exit(1)
-          print("OK: high_importance_count =", d.get("high_importance_count"))
-          PY
+          python3 scripts/resend_weekly_high.py response.json

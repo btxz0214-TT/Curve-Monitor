@@ -48,51 +48,24 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8001
 
 Then open `/docs` or `/` as needed.
 
-## Weekly HIGH digest (cron)
+## Weekly HIGH digest（推荐：GitHub + Resend，不占 Koyeb env）
 
-Endpoint: **`POST /internal/weekly-high-digest`**
+不在部署里配 Resend：**GitHub Actions** 定时 **`POST /run-scan`**（唤醒实例），再用仓库里的 **`scripts/resend_weekly_high.py`** 和 **GitHub Secrets** 发信。见 **`.github/workflows/weekly-radar-digest.yml`**。
 
-| Env var | Purpose |
-|--------|---------|
-| `CRON_SECRET` | Long random string; caller must send header `X-Cron-Secret` with the same value. |
-| **Option A — Resend (no Gmail app password)** | |
-| `RESEND_API_KEY` | API key from [resend.com](https://resend.com). If set, email is sent via Resend instead of SMTP. |
-| `WEEKLY_DIGEST_TO` | Recipient address (e.g. your Gmail). Required for Resend. |
-| `RESEND_FROM` | Optional. Default `Radar <onboarding@resend.dev>` (Resend test sender). |
-| **Option B — SMTP** | |
-| `SMTP_HOST` | e.g. `smtp.gmail.com` |
-| `SMTP_PORT` | `587` (STARTTLS) or `465` (SSL) |
-| `SMTP_USER` | Login user (e.g. Gmail address). |
-| `SMTP_PASSWORD` | Often an app password (Google Workspace / 2FA) — **not available on all accounts**. |
-| `WEEKLY_DIGEST_TO` | Optional with SMTP; defaults to `SMTP_USER`. |
+| GitHub Secret | 用途 |
+|---------------|------|
+| `RADAR_BASE_URL` | `https://你的服务.ai-builders.space`（不要末尾 `/`） |
+| `RESEND_API_KEY` | [resend.com](https://resend.com) |
+| `WEEKLY_DIGEST_TO` | 收件人 |
+| `RESEND_FROM` | 可选 |
+| `RUN_SCAN_SECRET` | 可选；若 Koyeb 上设置了同名 env，这里填相同值 |
 
-**Local test** (replace values):
+**部署端（可选）** 只加 **`RUN_SCAN_SECRET`**：一键部署若只能配少量变量，就只配这个；不配则 `/run-scan` 公开（适合作业演示，公网建议加锁）。
+
+**本地试跑扫描**（不发邮件）：
 
 ```bash
-curl -X POST "http://127.0.0.1:8001/internal/weekly-high-digest" \
-  -H "X-Cron-Secret: YOUR_CRON_SECRET" \
-  --max-time 900
-```
-
-**Deployed:** use your public base URL instead of `127.0.0.1`. Set client timeout to **several minutes** (same as `/run-scan`).
-
-**GitHub Actions** (repo → Settings → Secrets): store `RADAR_URL` (full URL to the endpoint) and `RADAR_CRON_SECRET`. Example workflow:
-
-```yaml
-on:
-  schedule: [{ cron: "0 9 * * 1" }]   # Mondays 09:00 UTC
-  workflow_dispatch: {}
-jobs:
-  digest:
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          curl -fsS -X POST "$RADAR_URL" \
-            -H "X-Cron-Secret: $RADAR_CRON_SECRET" \
-            --max-time 900
-        env:
-          RADAR_URL: ${{ secrets.RADAR_URL }}
-          RADAR_CRON_SECRET: ${{ secrets.RADAR_CRON_SECRET }}
+curl -X POST "http://127.0.0.1:8001/run-scan" -H "Accept: application/json" --max-time 900
 ```
 
 ## AI Builders 部署（Koyeb）
@@ -131,7 +104,7 @@ jobs:
    export AI_BUILDER_TOKEN=你的学生门户_API_Key   # 或与 .env 里相同的密钥
    python deploy_to_ai_builders.py --merge-dotenv
    ```
-   `--merge-dotenv` 会从本目录 `.env` 合并 `CRON_SECRET`、`RESEND_*`、`WEEKLY_DIGEST_TO` 到请求的 `env_vars`（无需把密钥写进 `deploy-config.json`）。
+   `--merge-dotenv` 会从本目录 `.env` 合并可选的 `RUN_SCAN_SECRET` 到 `env_vars`（Resend 等放在 GitHub Secrets，不必塞进 Koyeb）。
 4. 返回 **202** 后按响应说明轮询 `GET /v1/deployments/{service_name}`，约 5–10 分钟；公网地址一般为 `https://<service_name>.ai-builders.space`。
 
 **说明：** 部署后平台会注入 **`AI_BUILDER_TOKEN`**；本应用已支持用它作为调用 Space 后端的密钥（与本地 `SUPER_MIND_API_KEY` 二选一）。
